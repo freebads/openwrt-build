@@ -1,16 +1,4 @@
-#
-# https://github.com/P3TERX/Actions-OpenWrt
-#
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
-#
-# Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
-#
-# This is free software, licensed under the MIT License.
-# See /LICENSE for more information.
-#
-
-name: OpenWrt Builder
+name: Build OpenWrt Firmware
 
 on:
   repository_dispatch:
@@ -34,7 +22,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Initialization environment
       env:
@@ -102,59 +90,90 @@ jobs:
       if: (!cancelled())
       run: df -hT
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+    - name: Upload bin directory (備份)
+      uses: actions/upload-artifact@v4
+      if: steps.compile.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_bin_backup${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: openwrt/bin
+        retention-days: 1
 
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+    - name: Find firmware files
+      id: find-files
+      if: steps.compile.outputs.status == 'success' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        cd openwrt/bin/targets
+        # 搜尋所有 .bin, .img, .tar 等固件文件
+        FIRMWARE_FILES=$(find . -type f \( -name "*.bin" -o -name "*.img" -o -name "*.tar" -o -name "*.gz" \) -not -name "*.sha256sum" -not -name "*.md5sum")
+        if [ -z "$FIRMWARE_FILES" ]; then
+          echo "沒有找到固件文件！"
+          echo "當前目錄結構："
+          find . -type f | head -20
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        else
+          echo "找到固件文件："
+          echo "$FIRMWARE_FILES"
+          echo "FIRMWARE_PATH=openwrt/bin/targets" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        fi
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+    - name: Prepare firmware for upload
+      id: prepare
+      if: steps.find-files.outputs.status == 'success'
+      run: |
+        cd openwrt/bin/targets
+        # 創建一個專門存放固件的目錄
+        mkdir -p firmware_output
+        # 複製所有固件文件
+        find . -type f \( -name "*.bin" -o -name "*.img" -o -name "*.tar" -o -name "*.gz" \) -not -name "*.sha256sum" -not -name "*.md5sum" -exec cp {} firmware_output/ \;
+        
+        echo "準備上傳的固件："
+        ls -la firmware_output/
+        
+        # 計算文件數量
+        FILE_COUNT=$(ls -1 firmware_output/ | wc -l)
+        echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+        
+        # 創建詳細的發布說明
+        echo "## OpenWrt 固件編譯結果" > release_notes.md
+        echo "**編譯時間:** $(date)" >> release_notes.md
+        echo "**設備名稱:** ${{ env.DEVICE_NAME }}" >> release_notes.md
+        echo "**文件數量:** $FILE_COUNT" >> release_notes.md
+        echo "" >> release_notes.md
+        echo "### 包含的固件文件:" >> release_notes.md
+        ls -la firmware_output/ | awk '{print "- " $9 " (" $5 " bytes)"}' >> release_notes.md
+        echo "" >> release_notes.md
+        echo "### 下載方式:" >> release_notes.md
+        echo "1. 點擊右邊的 Artifacts 下載" >> release_notes.md
+        echo "2. 或者在下面的 Release 中下載" >> release_notes.md
+
+    - name: Upload firmware via Artifact (保證有下載)
+      uses: actions/upload-artifact@v4
+      if: steps.prepare.outputs.status == 'success' || steps.compile.outputs.status == 'success'
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
+        path: openwrt/bin/targets/firmware_output/
+        retention-days: 30
 
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+    - name: Create Release
+      if: env.UPLOAD_RELEASE == 'true' && steps.prepare.outputs.status == 'success'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: build-${{ env.FILE_DATE }}
+        name: OpenWrt Build ${{ env.FILE_DATE }}
+        body_path: release_notes.md
+        files: openwrt/bin/targets/firmware_output/*
+        draft: false
+        prerelease: false
+
+    - name: Debug output if failed
+      if: failure()
       run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@master
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@main
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        echo "=== 編譯失敗，顯示最後的日誌 ==="
+        cd openwrt
+        tail -100 logs/*.log 2>/dev/null || echo "沒有日誌文件"
+        echo "=== 當前目錄結構 ==="
+        find bin/ -type f 2>/dev/null | head -50 || echo "bin 目錄不存在"
