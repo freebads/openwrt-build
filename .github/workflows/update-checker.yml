@@ -8,7 +8,50 @@
 #
 # This is free software, licensed under the MIT License.
 # See /LICENSE for more information.
-#
+#name: Build OpenWrt DS81 Stable
+
+on:
+  push:
+    paths:
+      - '.config'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git wget unzip python3
+
+      - name: Clone OpenWrt
+        run: |
+          git clone https://github.com/openwrt/openwrt.git
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Copy custom config
+        run: |
+          cp .config openwrt/.config
+
+      - name: Build firmware
+        run: |
+          cd openwrt
+          make defconfig
+          make -j$(nproc)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v3
+        with:
+          name: openwrt-firmware
+          path: openwrt/bin/targets/x86/64/*.img.gz
+
 
 name: Update Checker
 
